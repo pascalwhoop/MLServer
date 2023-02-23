@@ -1,6 +1,6 @@
 import pytest
 from typing import Dict
-from mlserver_huggingface.common import HuggingFaceSettings
+from mlserver_huggingface.common import HuggingFaceWithAccelerateSettings
 
 
 @pytest.mark.parametrize(
@@ -14,5 +14,5 @@ from mlserver_huggingface.common import HuggingFaceSettings
     ],
 )
 def test_settings_task_name(envs: Dict[str, str], expected: str):
-    setting = HuggingFaceSettings(**envs)
+    setting = HuggingFaceWithAccelerateSettings(**envs)
     assert setting.task_name == expected

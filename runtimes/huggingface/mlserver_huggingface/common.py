@@ -12,7 +12,13 @@ from transformers.pipelines.base import Pipeline
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 import transformers
 from mlserver.logging import logger
+from mlserver.logging import logger
+from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+from huggingface_hub import snapshot_download
+from accelerate import Accelerator
+from transformers import AutoConfig
 
+accelerator = Accelerator()
 
 from optimum.pipelines import SUPPORTED_TASKS as SUPPORTED_OPTIMUM_TASKS
 
@@ -32,7 +38,7 @@ class InvalidTranformerInitialisation(MLServerError):
         )
 
 
-class HuggingFaceSettings(BaseSettings):
+class HuggingFaceWithAccelerateSettings(BaseSettings):
     """
     Parameters that apply only to alibi huggingface models
     """
@@ -41,23 +47,10 @@ class HuggingFaceSettings(BaseSettings):
         env_prefix = ENV_PREFIX_HUGGINGFACE_SETTINGS
 
     task: str = ""
-    # Why need this filed?
-    # for translation task, required a suffix to specify source and target
-    # related issue: https://github.com/SeldonIO/MLServer/issues/947
-    task_suffix: str = ""
     auto_loader_name: Optional[str] = "AutoModel"
     pretrained_model: Optional[str] = None
     model_parameters: Optional[Dict] = None
     pretrained_tokenizer: Optional[str] = None
-    optimum_model: bool = False
-    device: Optional[int] = None
-    batch_size: Optional[int] = None
-
-    @property
-    def task_name(self):
-        if self.task == "translation":
-            return f"{self.task}{self.task_suffix}"
-        return self.task
 
 
 def parse_parameters_from_env() -> Dict:
@@ -103,54 +96,42 @@ def parse_parameters_from_env() -> Dict:
                 )
     return parsed_parameters
 
-def _get_model_loader(hf_settings: HuggingFaceSettings): 
+def _get_model_loader(hf_settings: HuggingFaceWithAccelerateSettings): 
     auto_loader_name = hf_settings.auto_loader_name
     loader = getattr(transformers, auto_loader_name, None)
     return loader
 
-def load_pipeline_from_settings(hf_settings: HuggingFaceSettings) -> Pipeline:
+def load_pipeline_from_settings(hf_settings: HuggingFaceWithAccelerateSettings) -> Pipeline:
     """
     TODO
     """
     # TODO: Support URI for locally downloaded artifacts
     # uri = model_parameters.uri
+
+    # if
     model = hf_settings.pretrained_model
     tokenizer = hf_settings.pretrained_tokenizer
-    device = hf_settings.device
 
     if model and not tokenizer:
         tokenizer = model
+    
+    # apply the tricks from huggingface accelerate
 
-    if hf_settings.optimum_model:
-        logger.debug("loading model through optimum")
-        optimum_class = SUPPORTED_OPTIMUM_TASKS[hf_settings.task]["class"][0]
-        model = optimum_class.from_pretrained(
-            hf_settings.pretrained_model,
-            from_transformers=True,
-        )
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer)
-        # Device needs to be set to -1 due to known issue
-        # https://github.com/huggingface/optimum/issues/191
-        device = -1
-    else:
-        logger.debug("loading model without optimum")
-        model = _get_model_loader(hf_settings).from_pretrained(model, **hf_settings.model_parameters)
-        #model = AutoModel.from_pretrained(model, **hf_settings.model_parameters)
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+    path = snapshot_download(model)
+    config = AutoConfig.from_pretrained(model, **hf_settings.model_parameters)
+    with init_empty_weights():
+        model = _get_model_loader(hf_settings).from_config(config)
+    model = load_checkpoint_and_dispatch(model, path , 
+    device_map=hf_settings.model_parameters.get("device_map", "auto"),
+    offload_folder=hf_settings.model_parameters.get("offload_folder", "/tmp/offload"),
+    ) 
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer, **hf_settings.model_parameters)
 
-    pp = pipeline(
-        hf_settings.task_name,
+    return pipeline(
+        hf_settings.task,
         model=model,
         tokenizer=tokenizer,
-        device=device,
-        batch_size=hf_settings.batch_size,
     )
-
-    # If batch_size > 0 we need to ensure tokens are padded
-    if hf_settings.batch_size:
-        pp.tokenizer.pad_token_id = [str(pp.model.config.eos_token_id)]  # type: ignore
-
-    return pp
 
 
 class NumpyEncoder(json.JSONEncoder):

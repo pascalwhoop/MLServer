@@ -38,6 +38,7 @@ setup(
         "optimum[onnxruntime]>=1.4.0",
         "transformers",
         "Pillow",
+        "accelerate"
     ],
     long_description=_load_description(),
     long_description_content_type="text/markdown",
